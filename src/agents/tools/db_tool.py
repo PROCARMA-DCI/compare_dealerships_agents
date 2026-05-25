@@ -15,6 +15,7 @@ TABLES: dict[str, dict[str, Any]] = {
         "columns": ["id", "name", "slug", "created_at", "updated_at", "created_by"],
         "search_columns": ["id", "name", "slug", "created_by"],
         "order_by": "created_at",
+        "relations": {"created_by": "users.id"},
     },
 }
 
@@ -32,6 +33,7 @@ def get_allowed_database_context() -> dict[str, Any]:
         table_name: {
             "columns": config["columns"],
             "search_columns": config["search_columns"],
+            "relations": config.get("relations", {}),
         }
         for table_name, config in TABLES.items()
     }

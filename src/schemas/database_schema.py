@@ -3,6 +3,10 @@ from pydantic import BaseModel, Field
 
 class DatabaseChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
+    session_id: str | None = Field(
+        default=None,
+        description="Send the same session_id on every chat message to keep conversation memory.",
+    )
 
 
 class DatabaseSearchRequest(BaseModel):
