@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from src.routers import databaseRoute
 from src.routers import weatherRoute
 
 app = FastAPI(
@@ -24,3 +25,4 @@ app.add_middleware(
 
 
 app.include_router(weatherRoute.router)
+app.include_router(databaseRoute.router)
