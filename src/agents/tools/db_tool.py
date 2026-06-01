@@ -3,99 +3,131 @@ from typing import Any
 from agents import function_tool
 from sqlalchemy import MetaData, String, Table, cast, func, or_, select
 
+from src.db_tables import TABLES
 from src.lib.db_con import engine
-
-TABLES: dict[str, dict[str, Any]] = {
-    "users": {
-        "columns": ["id", "email", "full_name", "created_at", "updated_at"],
-        "search_columns": ["id", "email", "full_name"],
-        "order_by": "created_at",
-    },
-    "products": {
-        "columns": ["id", "name", "slug", "created_at", "updated_at", "created_by"],
-        "search_columns": ["id", "name", "slug", "created_by"],
-        "order_by": "created_at",
-        "relations": {"created_by": "users.id"},
-    },
-    "product_variants": {
-        "columns": ["id", "product_id", "sku", "created_at", "updated_at"],
-        "search_columns": ["id", "product_id", "sku"],
-        "order_by": "created_at",
-        "relations": {"product_id": "products.id"},
-    },
-}
 
 
 def serialize_row(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: value.isoformat() if hasattr(value, "isoformat") else value
-        for key, value in row.items()
-    }
+    return {k: v.isoformat() if hasattr(v, "isoformat") else v for k, v in row.items()}
 
 
-def get_allowed_database_context() -> dict[str, Any]:
-    """Return the database tables and fields this agent is allowed to expose."""
+def get_allowed_context() -> dict[str, Any]:
+    """Compact schema summary sent to the agent — only what it needs."""
     return {
-        table_name: {
-            "columns": config["columns"],
-            "search_columns": config["search_columns"],
-            "relations": config.get("relations", {}),
+        name: {
+            "columns": cfg["columns"],
+            "search_columns": cfg["search_columns"],
+            **({"parent_refs": cfg["parent_refs"]} if cfg.get("parent_refs") else {}),
+            **(
+                {
+                    "child_tables": {
+                        child: {"foreign_key": c["foreign_key"], "search_columns": c["search_columns"]}
+                        for child, c in cfg["child_tables"].items()
+                    }
+                }
+                if cfg.get("child_tables")
+                else {}
+            ),
         }
-        for table_name, config in TABLES.items()
+        for name, cfg in TABLES.items()
     }
 
 
 @function_tool
-def list_searchable_tables() -> dict[str, Any]:
-    """List only the whitelisted database tables and fields available for read-only search."""
-    return get_allowed_database_context()
+def list_tables() -> dict[str, Any]:
+    """List available tables, their columns, and searchable fields."""
+    return get_allowed_context()
 
 
-def search_table_records(
-    table_name: str, search: str = "", limit: int = 10
-) -> dict[str, Any]:
-    """Search a whitelisted database table using only whitelisted searchable fields."""
-    table_config = TABLES.get(table_name)
+@function_tool
+def smart_search(table_name: str, keywords: list[str], limit: int = 10) -> dict[str, Any]:
+    """
+    Search a table using multiple keywords extracted from a natural language query.
+    Automatically searches child tables (e.g. product_variants when table is products)
+    and returns merged, deduplicated results.
 
-    if table_config is None:
-        return {
-            "error": "Table is not allowed.",
-            "allowed_tables": list(TABLES.keys()),
-        }
+    Example: smart_search("products", ["red", "shirt"]) finds products whose name
+    contains "red" or "shirt", PLUS products that have a variant SKU containing
+    "red" or "shirt" (e.g. "TSHIRT-RED-M").
+    """
+    cfg = TABLES.get(table_name)
+    if cfg is None:
+        return {"error": f"Table '{table_name}' not found.", "available": list(TABLES.keys())}
 
     safe_limit = max(1, min(limit, 25))
-    columns = table_config["columns"]
-    order_by = table_config["order_by"]
+    clean = [k.strip().lower() for k in keywords if k.strip()]
+    if not clean:
+        return {"error": "Provide at least one keyword."}
 
-    metadata = MetaData()
-    table = Table(table_name, metadata, autoload_with=engine)
-    query = select(*[table.c[column] for column in columns])
+    pk = cfg.get("primary_key", "id")
+    meta = MetaData()
+    tbl = Table(table_name, meta, autoload_with=engine)
+    col_objs = [tbl.c[c] for c in cfg["columns"]]
+
+    def like_conds(t: Table, search_cols: list[str]) -> list:
+        return [func.lower(cast(t.c[col], String)).like(f"%{kw}%") for kw in clean for col in search_cols]
+
+    results: dict[Any, dict] = {}
+
+    with engine.connect() as conn:
+        # --- child table search: collect parent IDs ---
+        child_ids: set = set()
+        for child_name, child_cfg in cfg.get("child_tables", {}).items():
+            child_tbl = Table(child_name, meta, autoload_with=engine)
+            conds = like_conds(child_tbl, child_cfg["search_columns"])
+            if conds:
+                fk = child_cfg["foreign_key"]
+                for row in conn.execute(select(child_tbl.c[fk]).where(or_(*conds)).distinct()):
+                    child_ids.add(row[0])
+
+        # --- primary table keyword search ---
+        primary_conds = like_conds(tbl, cfg["search_columns"])
+        if primary_conds:
+            q = (
+                select(*col_objs)
+                .where(or_(*primary_conds))
+                .order_by(tbl.c[cfg["order_by"]].desc())
+                .limit(safe_limit)
+            )
+            for row in conn.execute(q).mappings():
+                d = serialize_row(dict(row))
+                results[d[pk]] = d
+
+        # --- fetch parent rows matched only via child search ---
+        missing = [i for i in child_ids if i not in results]
+        if missing:
+            remaining = safe_limit - len(results)
+            if remaining > 0:
+                q = (
+                    select(*col_objs)
+                    .where(tbl.c[pk].in_(missing[:remaining]))
+                    .order_by(tbl.c[cfg["order_by"]].desc())
+                )
+                for row in conn.execute(q).mappings():
+                    d = serialize_row(dict(row))
+                    results[d[pk]] = d
+
+    rows = list(results.values())[:safe_limit]
+    return {"table": table_name, "keywords": clean, "count": len(rows), "rows": rows}
+
+
+# Plain function for the REST /search endpoint (no agent overhead)
+def search_table_records(table_name: str, search: str = "", limit: int = 10) -> dict[str, Any]:
+    cfg = TABLES.get(table_name)
+    if cfg is None:
+        return {"error": "Table not found.", "allowed_tables": list(TABLES.keys())}
+
+    safe_limit = max(1, min(limit, 25))
+    meta = MetaData()
+    tbl = Table(table_name, meta, autoload_with=engine)
+    q = select(*[tbl.c[c] for c in cfg["columns"]])
 
     if search.strip():
-        search_term = f"%{search.strip().lower()}%"
-        query = query.where(
-            or_(
-                *[
-                    func.lower(cast(table.c[column], String)).like(search_term)
-                    for column in table_config["search_columns"]
-                ]
-            )
-        )
+        term = f"%{search.strip().lower()}%"
+        q = q.where(or_(*[func.lower(cast(tbl.c[c], String)).like(term) for c in cfg["search_columns"]]))
 
-    query = query.order_by(table.c[order_by].desc()).limit(safe_limit)
+    q = q.order_by(tbl.c[cfg["order_by"]].desc()).limit(safe_limit)
+    with engine.connect() as conn:
+        rows = conn.execute(q).mappings().all()
 
-    with engine.connect() as connection:
-        rows = connection.execute(query).mappings().all()
-
-    return {
-        "table": table_name,
-        "allowed_fields": columns,
-        "count": len(rows),
-        "rows": [serialize_row(dict(row)) for row in rows],
-    }
-
-
-@function_tool
-def search_table(table_name: str, search: str = "", limit: int = 10) -> dict[str, Any]:
-    """Search a whitelisted database table using only whitelisted searchable fields."""
-    return search_table_records(table_name, search, limit)
+    return {"table": table_name, "count": len(rows), "rows": [serialize_row(dict(r)) for r in rows]}

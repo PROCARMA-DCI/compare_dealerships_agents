@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 
 from src.agents.database_agent import run_database_agent
-from src.agents.tools.db_tool import search_table_records
+from src.agents.tools.db_tool import search_table_records  # direct search, no agent
 from src.lib.chat_session import clear_chat_session
 from src.schemas.database_schema import DatabaseChatRequest, DatabaseSearchRequest
 
