@@ -17,6 +17,12 @@ TABLES: dict[str, dict[str, Any]] = {
         "order_by": "created_at",
         "relations": {"created_by": "users.id"},
     },
+    "product_variants": {
+        "columns": ["id", "product_id", "sku", "created_at", "updated_at"],
+        "search_columns": ["id", "product_id", "sku"],
+        "order_by": "created_at",
+        "relations": {"product_id": "products.id"},
+    },
 }
 
 
