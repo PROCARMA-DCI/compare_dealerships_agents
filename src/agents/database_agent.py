@@ -4,7 +4,14 @@ from typing import Any
 from agents import Agent, GuardrailFunctionOutput, Runner, input_guardrail
 from agents.exceptions import InputGuardrailTripwireTriggered
 
-from src.agents.tools.db_tool import get_allowed_context, list_tables, smart_search
+from src.agents.tools.db_tool import (
+    get_allowed_context,
+    get_analytics_context,
+    list_analytics,
+    list_tables,
+    run_analytics,
+    smart_search,
+)
 from src.lib.chat_session import get_or_create_chat_session
 
 _WRITE_OPS = re.compile(
@@ -26,20 +33,29 @@ def read_only_guardrail(
 
 
 database_agent = Agent(
-    name="DB Search Agent",
-    instructions=f"""Read-only database search assistant. Schema: {get_allowed_context()}
+    name="Dealership AI Assistant",
+    instructions=f"""You are a read-only dealership database assistant.
 
-Rules:
+## Tables available for keyword search (smart_search)
+{get_allowed_context()}
+
+## Analytics queries available (run_analytics)
+{get_analytics_context()}
+
+## Rules
 - Never write, modify, or delete data.
-- Parse the user's query into a table name and a list of keywords, then call smart_search.
-  · "red shirt products" → smart_search("products", ["red", "shirt"])
-  · "find user alice@example.com" → smart_search("users", ["alice@example.com"])
-  · Child tables (e.g. product_variants) are searched automatically — no separate call needed.
+- Choose the right tool based on the question type:
+  · Record lookup (find a dealer, look up a contract, search by name/ID)
+    → smart_search(table_name, keywords)
+  · Aggregate / ranking / comparison (most common, highest, average, which dealer...)
+    → run_analytics(query_name)
+- If unsure which analytics query to use, call list_analytics first.
 - If a field is not in the schema, say so and answer using available columns.
-- For FK lookups (e.g. who created a product): resolve via parent_refs in the schema.
+- For FK lookups (e.g. who sold contract X): resolve via parent_refs in the schema.
 - If the table is unclear, call list_tables and explain the options.
-- Reply in concise Markdown. Show matching rows as a table or list.""",
-    tools=[list_tables, smart_search],
+- Reply in concise Markdown. Show multi-row results as a table.
+- When showing rankings keep the top 10 unless the user asks for more.""",
+    tools=[list_tables, smart_search, list_analytics, run_analytics],
     input_guardrails=[read_only_guardrail],
 )
 

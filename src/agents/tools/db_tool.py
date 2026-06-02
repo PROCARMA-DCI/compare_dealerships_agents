@@ -1,9 +1,9 @@
 from typing import Any
 
 from agents import function_tool
-from sqlalchemy import MetaData, String, Table, cast, func, or_, select
+from sqlalchemy import MetaData, String, Table, cast, func, or_, select, text
 
-from src.db_tables import TABLES
+from src.db_tables import ANALYTICS, TABLES
 from src.lib.db_con import engine
 
 
@@ -33,6 +33,11 @@ def get_allowed_context() -> dict[str, Any]:
     }
 
 
+def get_analytics_context() -> dict[str, str]:
+    """Returns {query_name: description} for all analytics queries."""
+    return {name: cfg["description"] for name, cfg in ANALYTICS.items()}
+
+
 @function_tool
 def list_tables() -> dict[str, Any]:
     """List available tables, their columns, and searchable fields."""
@@ -40,15 +45,49 @@ def list_tables() -> dict[str, Any]:
 
 
 @function_tool
+def list_analytics() -> dict[str, str]:
+    """List all available analytics query names and what each one returns."""
+    return get_analytics_context()
+
+
+@function_tool
+def run_analytics(query_name: str, limit: int = 25) -> dict[str, Any]:
+    """
+    Run a predefined analytics/aggregation query by name.
+    Use for questions about rankings, totals, averages, and comparisons —
+    e.g. most common car, which dealership redeems most, average days to pay.
+    Call list_analytics first if you are unsure which query_name to use.
+    """
+    cfg = ANALYTICS.get(query_name)
+    if cfg is None:
+        return {
+            "error": f"Analytics query '{query_name}' not found.",
+            "available": get_analytics_context(),
+        }
+
+    safe_limit = max(1, min(limit, 100))
+    sql = f"{cfg['sql'].strip()} LIMIT {safe_limit}"
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql)).mappings().all()
+
+    return {
+        "query": query_name,
+        "description": cfg["description"],
+        "count": len(rows),
+        "rows": [serialize_row(dict(r)) for r in rows],
+    }
+
+
+@function_tool
 def smart_search(table_name: str, keywords: list[str], limit: int = 10) -> dict[str, Any]:
     """
     Search a table using multiple keywords extracted from a natural language query.
-    Automatically searches child tables (e.g. product_variants when table is products)
+    Automatically searches child tables (e.g. contractcoupon when table is tbl_contract)
     and returns merged, deduplicated results.
 
-    Example: smart_search("products", ["red", "shirt"]) finds products whose name
-    contains "red" or "shirt", PLUS products that have a variant SKU containing
-    "red" or "shirt" (e.g. "TSHIRT-RED-M").
+    Use for record lookups — e.g. find a dealer by name, look up a contract ID.
+    For aggregate/ranking questions use run_analytics instead.
     """
     cfg = TABLES.get(table_name)
     if cfg is None:
