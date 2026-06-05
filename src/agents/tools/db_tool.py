@@ -21,7 +21,10 @@ def get_allowed_context() -> dict[str, Any]:
             **(
                 {
                     "child_tables": {
-                        child: {"foreign_key": c["foreign_key"], "search_columns": c["search_columns"]}
+                        child: {
+                            "foreign_key": c["foreign_key"],
+                            "search_columns": c["search_columns"],
+                        }
                         for child, c in cfg["child_tables"].items()
                     }
                 }
@@ -80,7 +83,9 @@ def run_analytics(query_name: str, limit: int = 25) -> dict[str, Any]:
 
 
 @function_tool
-def smart_search(table_name: str, keywords: list[str], limit: int = 10) -> dict[str, Any]:
+def smart_search(
+    table_name: str, keywords: list[str], limit: int = 10
+) -> dict[str, Any]:
     """
     Search a table using multiple keywords extracted from a natural language query.
     Automatically searches child tables (e.g. contractcoupon when table is tbl_contract)
@@ -91,7 +96,10 @@ def smart_search(table_name: str, keywords: list[str], limit: int = 10) -> dict[
     """
     cfg = TABLES.get(table_name)
     if cfg is None:
-        return {"error": f"Table '{table_name}' not found.", "available": list(TABLES.keys())}
+        return {
+            "error": f"Table '{table_name}' not found.",
+            "available": list(TABLES.keys()),
+        }
 
     safe_limit = max(1, min(limit, 25))
     clean = [k.strip().lower() for k in keywords if k.strip()]
@@ -104,7 +112,11 @@ def smart_search(table_name: str, keywords: list[str], limit: int = 10) -> dict[
     col_objs = [tbl.c[c] for c in cfg["columns"]]
 
     def like_conds(t: Table, search_cols: list[str]) -> list:
-        return [func.lower(cast(t.c[col], String)).like(f"%{kw}%") for kw in clean for col in search_cols]
+        return [
+            func.lower(cast(t.c[col], String)).like(f"%{kw}%")
+            for kw in clean
+            for col in search_cols
+        ]
 
     results: dict[Any, dict] = {}
 
@@ -116,7 +128,9 @@ def smart_search(table_name: str, keywords: list[str], limit: int = 10) -> dict[
             conds = like_conds(child_tbl, child_cfg["search_columns"])
             if conds:
                 fk = child_cfg["foreign_key"]
-                for row in conn.execute(select(child_tbl.c[fk]).where(or_(*conds)).distinct()):
+                for row in conn.execute(
+                    select(child_tbl.c[fk]).where(or_(*conds)).distinct()
+                ):
                     child_ids.add(row[0])
 
         # --- primary table keyword search ---
@@ -148,25 +162,3 @@ def smart_search(table_name: str, keywords: list[str], limit: int = 10) -> dict[
 
     rows = list(results.values())[:safe_limit]
     return {"table": table_name, "keywords": clean, "count": len(rows), "rows": rows}
-
-
-# Plain function for the REST /search endpoint (no agent overhead)
-def search_table_records(table_name: str, search: str = "", limit: int = 10) -> dict[str, Any]:
-    cfg = TABLES.get(table_name)
-    if cfg is None:
-        return {"error": "Table not found.", "allowed_tables": list(TABLES.keys())}
-
-    safe_limit = max(1, min(limit, 25))
-    meta = MetaData()
-    tbl = Table(table_name, meta, autoload_with=engine)
-    q = select(*[tbl.c[c] for c in cfg["columns"]])
-
-    if search.strip():
-        term = f"%{search.strip().lower()}%"
-        q = q.where(or_(*[func.lower(cast(tbl.c[c], String)).like(term) for c in cfg["search_columns"]]))
-
-    q = q.order_by(tbl.c[cfg["order_by"]].desc()).limit(safe_limit)
-    with engine.connect() as conn:
-        rows = conn.execute(q).mappings().all()
-
-    return {"table": table_name, "count": len(rows), "rows": [serialize_row(dict(r)) for r in rows]}
